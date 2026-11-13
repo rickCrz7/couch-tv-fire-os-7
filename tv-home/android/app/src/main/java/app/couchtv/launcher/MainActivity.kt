@@ -643,10 +643,10 @@ class MainActivity : Activity() {
             if (id.isBlank()) return false
             if (Build.MODEL == "AFTHA001") {
                 val input = passthroughInputs().firstOrNull { it.id == id } ?: return false
-                if (input.type == TvInputInfo.TYPE_HDMI) {
-                    return start(Intent(this@MainActivity, HdmiInputActivity::class.java)
-                        .putExtra(HdmiInputActivity.INPUT_ID, input.id)
-                        .putExtra(HdmiInputActivity.INPUT_LABEL, inputLabel(input)))
+                if (input.type == TvInputInfo.TYPE_HDMI || input.type == TvInputInfo.TYPE_COMPOSITE) {
+                    return start(Intent(this@MainActivity, PassthroughInputActivity::class.java)
+                        .putExtra(PassthroughInputActivity.INPUT_ID, input.id)
+                        .putExtra(PassthroughInputActivity.INPUT_LABEL, inputLabel(input)))
                 }
             }
             val view = Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(id))

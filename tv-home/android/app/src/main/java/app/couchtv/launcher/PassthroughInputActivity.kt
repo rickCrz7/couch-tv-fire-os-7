@@ -13,8 +13,8 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 
-/** Plays a physical HDMI input in this app on Fire TV builds where Live TV handles the generic intent. */
-class HdmiInputActivity : Activity() {
+/** Plays a physical TV input in this app on Fire TV builds where Live TV handles the generic intent. */
+class PassthroughInputActivity : Activity() {
     private lateinit var tv: TvView
     private lateinit var status: TextView
     private lateinit var inputId: String
@@ -28,7 +28,7 @@ class HdmiInputActivity : Activity() {
             return
         }
         inputId = selected
-        label = intent.getStringExtra(INPUT_LABEL).orEmpty().ifBlank { "HDMI" }
+        label = intent.getStringExtra(INPUT_LABEL).orEmpty().ifBlank { "TV input" }
         tv = TvView(this)
         status = TextView(this).apply {
             gravity = Gravity.CENTER

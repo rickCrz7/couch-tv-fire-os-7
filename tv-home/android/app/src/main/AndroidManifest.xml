@@ -113,7 +113,7 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".HdmiInputActivity"
+        <activity android:name=".PassthroughInputActivity"
             android:exported="false" android:screenOrientation="landscape" />
 
         <!-- What Android's installer says about an update (Updater.kt). Only reachable through the
