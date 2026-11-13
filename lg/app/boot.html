@@ -83,6 +83,7 @@
     x.send();
     var y = new XMLHttpRequest();
     y.open("GET", BRIDGE + "/api/webos/apps" + (S.tv ? "?tv=" + encodeURIComponent(S.tv) : ""));
+    if (S.key) y.setRequestHeader("Authorization", "Bearer " + S.key);
     y.timeout = 4000;
     y.onload = function () {
       var list = null;

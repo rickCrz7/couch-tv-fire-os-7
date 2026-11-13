@@ -4,7 +4,7 @@ Written by [killy10o10](https://github.com/killy10o10/couch-tv), who runs couch-
 (`dev.couchtv.ontv`, option C) as the home screen of a
 **Fire TV Stick 4K (2nd gen, model AFTKM) on Fire OS 8.1.8.5 (Android 11)**. Everything below was
 done on that stick. Other Fire OS 7 and 8 sticks should behave the same; sticks on **Vega OS**
-cannot sideload apps at all.
+have no APKs or ADB: they use a different path ([FIRE-VEGA.md](FIRE-VEGA.md)).
 
 ![couch-tv on the Fire TV Stick](screens/firestick-home.jpg)
 
@@ -24,7 +24,7 @@ cannot sideload apps at all.
 | Survives a restart | Yes (the accessibility watcher stays on) |
 | Bluetooth button | Yes. If parental controls are on, Fire OS asks for the Prime Video PIN first |
 | Network button | Yes |
-| Phone remote | Opening apps works without ADB. Keys, typing and "what's playing" need the TV's own ADB (Connect ADB in the app) |
+| Phone remote | Opening apps works without ADB. Keys, typing and "what's playing" need the TV's own ADB (Connect ADB in the app), which current Fire OS blocks: `scripts/check-tv.py <tv address> --adb` says whether yours does, and points to option B (the computer bridge) for the full remote |
 | Keep watching | Only fills from shows started from the phone remote |
 | Amazon's YouTube app | Yes, shown and sorted as YouTube |
 
@@ -48,12 +48,15 @@ network as the stick.
    ```
 5. **Open Couch TV** on the stick and press **Use as home screen**. Skip Connect ADB unless you
    want the phone remote's keys.
-6. **Two grants** so it can take the Home key back (they survive restarts):
+6. **Three grants** so it can take the Home key back (they survive restarts):
    ```sh
    adb -s <stick-ip>:5555 shell pm grant dev.couchtv.ontv android.permission.WRITE_SECURE_SETTINGS
    adb -s <stick-ip>:5555 shell appops set dev.couchtv.ontv SYSTEM_ALERT_WINDOW allow
+   adb -s <stick-ip>:5555 shell appops set dev.couchtv.ontv GET_USAGE_STATS allow
    ```
-   (On Fire OS 8.1.8.5 the second was already `allow` after install; running it does no harm.)
+   (On Fire OS 8.1.8.5 the second was already `allow` after install; running it does no harm. The
+   third is for Fire OS 6, where the accessibility watcher never connects and the app watches usage
+   events instead; on 7 and 8 it is simply not used.)
 7. **Press "Use as home screen" after the grants** (if it was already on, press it off and on
    again). The app switches its accessibility watcher on when that switch is pressed and at every
    boot, and it needs the grant to be there first. Check it took:

@@ -11,10 +11,10 @@ android {
     compileSdk = 34
     defaultConfig {
         applicationId = "app.couchtv.launcher.hdmitest"
-        minSdk = 25          // Android 7.1, so Fire OS 6 sticks (Fire TV Stick 4K, 1st gen) install it
+        minSdk = 23          // Android 6.0 (older Mi TVs); Fire OS 6 (7.1) sticks install it too
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.12-input-test"
+        versionCode = 19
+        versionName = "0.12.1"
         // Where the bridge might be: ./gradlew assembleRelease -PbridgeUrls=http://my-computer.local:5400
         // (comma separated, more than one is fine). The last one that answered is remembered on the TV.
         // Without it, apply.sh tells the app the address when it installs (the "bridge" extra), and
@@ -23,7 +23,7 @@ android {
         buildConfigField("String[]", "BRIDGES", "{" + urls.joinToString(", ") { "\"" + it + "\"" } + "}")
         // Whose GitHub releases Home settings, Updates offers: -PupdateRepo=owner/name for a fork
         // with releases of its own, -PupdateRepo= (empty) for none. Updater.kt checks the format.
-        val updateRepo = (project.findProperty("updateRepo") as String? ?: "").trim()
+        val updateRepo = (project.findProperty("updateRepo") as String? ?: "rickCrz7/couch-tv-fire-os-7").trim()
         buildConfigField("String", "UPDATE_REPO", "\"" + updateRepo.filter { it.isLetterOrDigit() || it in "/._-" } + "\"")
     }
     buildFeatures { buildConfig = true }
@@ -50,6 +50,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 /**

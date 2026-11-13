@@ -60,14 +60,24 @@ object Tv {
 
     fun tvLaunchables(): List<android.content.pm.ResolveInfo> {
         val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
-        return ctx.packageManager.queryIntentActivities(q, 0).distinctBy { it.activityInfo.packageName }
+        // Fire TV's Appstore declares LAUNCHER, but no LEANBACK_LAUNCHER.
+        val store = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage("com.amazon.venezia")
+        return (ctx.packageManager.queryIntentActivities(q, 0) + ctx.packageManager.queryIntentActivities(store, 0))
+            .distinctBy { it.activityInfo.packageName }
+    }
+
+    /** The same launch target for the TV tile and the phone remote. */
+    fun launchIntent(pkg: String): Intent? {
+        val pm = ctx.packageManager
+        // The store's ordinary LAUNCHER activity opens "Your Apps & Games", not the storefront.
+        val store = Intent("com.amazon.venezia.ade.FEATURED_LAUNCH").setPackage(pkg)
+            .takeIf { pkg == "com.amazon.venezia" && pm.resolveActivity(it, 0) != null }
+        return store ?: pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg)
     }
 
     /** Opens an app. ADB when connected (works from the background on every TV), else an intent. */
     fun launchPackage(pkg: String): String {
-        val pm = ctx.packageManager
-        val i = pm.getLeanbackLaunchIntentForPackage(pkg) ?: pm.getLaunchIntentForPackage(pkg)
-            ?: throw ApiError(404, "$pkg is not installed on the TV")
+        val i = launchIntent(pkg) ?: throw ApiError(404, "$pkg is not installed on the TV")
         val comp = i.component
         if (Adb.connected && comp != null) {
             val out = Adb.shell("am start -n ${comp.packageName}/${comp.className} -a android.intent.action.MAIN -f 0x10200000", 12_000)
@@ -98,7 +108,7 @@ object Tv {
         return "intent"
     }
 
-    private fun start(i: Intent) {
+    fun start(i: Intent) {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         var err: Exception? = null
         val latch = java.util.concurrent.CountDownLatch(1)
@@ -234,7 +244,8 @@ object Tv {
     // ---------- what is playing (dumpsys media_session, same parsing as the computer bridge) ----------
     data class Session(val pkg: String, var active: Boolean = false, var state: String? = null, var position: Long? = null,
                        var updated: Long? = null, var speed: Double = 0.0, var title: String? = null, var subtitle: String? = null,
-                       var queueTitle: String? = null, var album: String? = null)
+                       var queueTitle: String? = null, var album: String? = null, var duration: Long? = null,
+                       var pos_s: Double? = null, var dur_s: Double? = null)
 
     fun sessions(): Pair<Long?, List<Session>> {
         if (!Adb.connected) return null to emptyList()
@@ -259,9 +270,30 @@ object Tv {
                     cur!!.title = parts.getOrNull(0)?.takeIf { it != "null" && it.isNotEmpty() }
                     cur!!.subtitle = parts.getOrNull(1)?.takeIf { it != "null" && it.isNotEmpty() }
                     cur!!.album = parts.getOrNull(2)?.takeIf { it != "null" && it.isNotEmpty() }
+                    val mDur = Regex("(?:duration|DURATION)=(\\d+)").find(line)
+                    if (mDur != null) {
+                        cur!!.duration = mDur.groupValues[1].toLongOrNull()
+                        cur!!.dur_s = cur!!.duration?.let { Math.round(it / 100.0) / 10.0 }
+                    }
+                }
+                cur != null && (line.contains("duration", ignoreCase = true) || line.contains("android.media.metadata.duration", ignoreCase = true)) -> {
+                    val mDur = Regex("(?:duration|DURATION)=(\\d+)").find(line)
+                    if (mDur != null) {
+                        cur!!.duration = mDur.groupValues[1].toLongOrNull()
+                        cur!!.dur_s = cur!!.duration?.let { Math.round(it / 100.0) / 10.0 }
+                    }
                 }
                 line.startsWith("queueTitle=") && cur != null ->
                     cur!!.queueTitle = line.substringAfter("=").substringBeforeLast(", size=").trim().takeIf { it != "null" && it.isNotEmpty() }
+            }
+        }
+        for (s in found) {
+            if (s.position != null && s.position!! >= 0) {
+                val delta = if (uptime != null && s.updated != null && s.updated!! >= 0 && s.state == "PLAYING")
+                    Math.max(0L, uptime - s.updated!!)
+                else 0L
+                val posMs = s.position!! + (delta * s.speed).toLong()
+                s.pos_s = Math.max(0.0, Math.round(posMs / 100.0) / 10.0)
             }
         }
         return uptime to found

@@ -10,6 +10,48 @@ let tvId = null;
 export const setTvId = (id) => { tvId = id || null; };
 const withTv = (path) => (tvId ? `${path}${path.includes('?') ? '&' : '?'}tv=${encodeURIComponent(tvId)}` : path);
 
+let apiKey = null;
+try {
+  apiKey = localStorage.getItem('couchtv.key') || localStorage.getItem('couchtv.token');
+} catch (e) { /* private mode */ }
+if (typeof document !== 'undefined') {
+  try {
+    if (document.cookie.indexOf('couchtv_key=') >= 0) {
+      document.cookie = 'couchtv_key=; path=/; max-age=0; SameSite=Strict';
+    }
+  } catch (e) {}
+}
+if (typeof window !== 'undefined' && window.location) {
+  try {
+    const q = window.location.search.match(/[?&](?:pair|key)=([^&]+)/);
+    if (q) {
+      apiKey = decodeURIComponent(q[1]);
+      try {
+        localStorage.setItem('couchtv.key', apiKey);
+        const u = new URL(window.location.href);
+        u.searchParams.delete('pair');
+        u.searchParams.delete('key');
+        window.history.replaceState({}, '', u.pathname + (u.search || '') + (u.hash || ''));
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+export const setApiKey = (key) => {
+  apiKey = key || null;
+  try {
+    if (key) {
+      localStorage.setItem('couchtv.key', key);
+    } else {
+      localStorage.removeItem('couchtv.key');
+      localStorage.removeItem('couchtv.token');
+    }
+    if (typeof document !== 'undefined' && document.cookie.indexOf('couchtv_key=') >= 0) {
+      document.cookie = 'couchtv_key=; path=/; max-age=0; SameSite=Strict';
+    }
+  } catch (e) {}
+};
+
 // Every call gives up in the end, so the app never sits on "Loading" for ever.
 // Ask and play wait longer: Claude thinks first, and waking a TV takes up to 25 s.
 async function call(method, path, body, ms = 12000) {
@@ -17,10 +59,13 @@ async function call(method, path, body, ms = 12000) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), ms);
   if (tvId) { if (method === 'GET') path = withTv(path); else body = { ...(body || {}), tv: tvId }; }
+  const headers = {};
+  if (method === 'POST' || body) headers['content-type'] = 'application/json';
+  if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
   try {
     res = await fetch(path, {
       method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
+      headers: Object.keys(headers).length ? headers : undefined,
       body: body ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     });
@@ -32,6 +77,9 @@ async function call(method, path, body, ms = 12000) {
   let data = null;
   try { data = await res.json(); } catch { /* non-JSON */ }
   if (!res.ok || !data || data.ok === false) {
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('couchtv:unauthorized'));
+    }
     const msg = data?.error || (res.status === 503 ? 'TV not connected' : res.status === 404 ? 'Not found' : 'Something went wrong');
     throw new ApiError(msg, res.status);
   }
@@ -43,7 +91,7 @@ export const api = {
   apps: () => call('GET', '/api/apps'),
   recs: (who) => call('GET', `/api/recs?who=${encodeURIComponent(who)}`),
   continueList: (who) => call('GET', `/api/continue?who=${encodeURIComponent(who)}`),
-  setWho: (who) => call('POST', '/api/who', { who }),
+  setWho: (who, pin) => call('POST', '/api/who', pin ? { who, pin } : { who }),
   openContinue: (id, who) => call('POST', '/api/continue/open', { id, who }, 60000),
   config: () => call('GET', '/api/config'),
   screens: () => call('GET', '/api/screens'),
@@ -51,11 +99,13 @@ export const api = {
   key: (key, hold = false) => call('POST', '/api/key', hold ? { key, hold: true } : { key }),
   text: (text) => call('POST', '/api/text', { text }),
   launch: (app) => call('POST', '/api/launch', { app }),
+  pointer: (d) => call('POST', '/api/pointer', d, 5000),
   play: (show, who) => call('POST', '/api/play', { ...show, who }, 60000),
   ask: (text, who) => call('POST', '/api/ask', { text, who }, 90000),
   power: (state) => call('POST', '/api/power', { state }, 40000),
   volume: (action, steps) => call('POST', '/api/volume', steps ? { action, steps } : { action }),
   setSleep: (minutes) => call('POST', '/api/sleep', { minutes }),
+  cancelIdle: () => call('POST', '/api/idle/cancel', {}),
   openScreen: (id) => call('POST', '/api/screens/open', { id }),
   tvs: () => call('GET', '/api/tvs'),
   picture: (mode) => call('POST', '/api/picture', { mode }, 20000),   // a picture switch can take several seconds
@@ -65,6 +115,12 @@ export const api = {
   people: () => call('GET', '/api/people'),
   savePeople: (people) => call('POST', '/api/people', { people }),
   settings: () => call('GET', '/api/settings'),   // the TV home's Home settings (its language)
+  health: () => call('GET', '/api/health'),
+  pair: (key) => call('POST', '/api/pair', { key }),
+  find: (title) => call('GET', `/api/find?title=${encodeURIComponent(title)}`, null, 20000),
+  // kids mode: the shelves, and changes to them with the parent PIN (bridge/API.md)
+  kids: () => call('GET', '/api/kids', null, 20000),
+  kidsChange: (body) => call('POST', '/api/kids', body, 20000),
 };
 
 // Live TV state: server-sent events, with a slow poll as the fallback when the stream drops.
@@ -74,7 +130,9 @@ export function subscribeNow(onNow, onReach) {
     if (closed) return;
     clearTimeout(retry);
     es?.close();
-    es = new EventSource(withTv('/api/events'));
+    let streamUrl = withTv('/api/events');
+    if (apiKey && !streamUrl.includes('token=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(apiKey);
+    es = new EventSource(streamUrl);
     es.addEventListener('now', (e) => { fails = 0; onReach(true); try { onNow(JSON.parse(e.data)); } catch { /* ignore */ } });
     es.onerror = () => {
       es.close(); fails += 1;

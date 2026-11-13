@@ -23,6 +23,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -70,12 +71,14 @@ class MainActivity : Activity() {
     private var probing = false
     private var offline = false   // showing the saved copy because the computer is off
     private var resumed = false
+    private var waitingForNet = false   // just switched on, no Wi-Fi yet: the first load waits for it
     private val retry = Runnable { if (!pageReady || offline) connect() }
 
     private val prefs by lazy { getSharedPreferences("home", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        shown = java.lang.ref.WeakReference(this)
         CrashGuard.install(this)
         restoreTimeout()   // a press left the screen timeout short: put it back
         // apply.sh starting the home on purpose (new settings) is always a fresh try.
@@ -102,15 +105,39 @@ class MainActivity : Activity() {
         FireWatch.ensure(this)   // Fire TV only, and only once a computer has switched it on
         main.postDelayed({ FireWatch.rebindIfUnbound(applicationContext) }, 10_000L)   // listed but not bound after a force-stop
         // At power-on the page is often asked for before Wi-Fi is up: try again the moment it is.
-        getSystemService(android.net.ConnectivityManager::class.java)?.registerDefaultNetworkCallback(
-            object : android.net.ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: android.net.Network) {
-                    main.post { if (loadFailed || offline) connect() }
-                }
-            })
-        // Load the last bridge that worked straight away; only probe the others if it fails.
+        val netBack = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                main.post { if (waitingForNet) firstLoad.run() else if (loadFailed || offline) connect() }
+            }
+        }
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        // No network yet (the TV just switched on): wait for Wi-Fi a moment before the first try,
+        // rather than flash "the bridge isn't answering" for the few seconds Wi-Fi takes.
+        if (!alone() && !online(cm)) {
+            waitingForNet = true
+            main.postDelayed(firstLoadLater, NET_WAIT_MS)
+        }
+        if (Build.VERSION.SDK_INT >= 24) cm?.registerDefaultNetworkCallback(netBack)
+        else cm?.registerNetworkCallback(   // Android 6: no "default network" call, ask for any network with internet
+            android.net.NetworkRequest.Builder().addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), netBack)
+        if (!waitingForNet) firstLoad.run()
+    }
+
+    // Load the last bridge that worked straight away; only probe the others if it fails.
+    private val firstLoad: Runnable = Runnable {
+        waitingForNet = false
+        main.removeCallbacks(firstLoadLater)
         val saved = prefs.getString("bridge", null)
         if (saved != null) showWeb(saved) else connect()
+    }
+    private val firstLoadLater: Runnable = Runnable { if (waitingForNet) firstLoad.run() }
+
+    /** A network that says it reaches the internet (or no way to tell, with no ConnectivityManager). */
+    private fun online(cm: android.net.ConnectivityManager?): Boolean {
+        if (cm == null) return true
+        val n = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(n) ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -135,8 +162,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
-        restoreTimeout()   // back in front: the normal screen timeout goes back
+        restoreTimeout(resume = true)   // back in front: the normal screen timeout goes back (not for the first moments of a press, see ambientAt)
         hideSystemBars()
+        // Back within a moment of opening a channel card: the app crashed on the way in (see
+        // openWatchNextItem). Open it once more; this time it starts cold.
+        channelOpened?.let { (at, i) ->
+            channelOpened = null
+            if (android.os.SystemClock.elapsedRealtime() - at < CHANNEL_RETRY_MS) start(i)
+        }
         if (pageReady && offline && alone()) {
             js("window.tv && tv.resume()")   // option A: the built-in copy is the home, keep it fresh
         } else if (pageReady && !offline) {
@@ -154,6 +187,13 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         resumed = false
+        try {
+            val lp = window.attributes
+            if (lp.screenBrightness == 0.0f) {
+                lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                window.attributes = lp
+            }
+        } catch (_: Exception) {}
         restoreTimeout(dream = true)   // the screensaver covered the home: timeout goes back
         js("window.tv && tv.pause && tv.pause()")   // the video background stops while an app is in front
     }
@@ -175,6 +215,13 @@ class MainActivity : Activity() {
         if (event.keyCode == KeyEvent.KEYCODE_SETTINGS) {
             if (event.action == KeyEvent.ACTION_UP && event.repeatCount == 0 && pageReady) js("window.tv && tv.settingsKey && tv.settingsKey()")
             return true
+        }
+        // The TV's own keys (TV/channels, guide, channel up and down, last channel, input): the home
+        // uses none of them, and the WebView would swallow them. Hand them back unhandled so the TV's
+        // own system gets them (Philips handles TV as an unhandled key fallback), for #90.
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_TV, KeyEvent.KEYCODE_GUIDE, KeyEvent.KEYCODE_CHANNEL_UP,
+            KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_LAST_CHANNEL, KeyEvent.KEYCODE_TV_INPUT -> return false
         }
         // The home screen never exits on BACK; the page decides what BACK means.
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
@@ -206,6 +253,9 @@ class MainActivity : Activity() {
         }
         i.getStringExtra("tv")?.trim()?.let {
             if (it.isEmpty()) e.remove("tv") else if (TV_NAME.matches(it)) e.putString("tv", it)
+        }
+        i.getStringExtra("key")?.trim()?.let {
+            if (it.isEmpty()) e.remove("pairing_key") else e.putString("pairing_key", it)
         }
         e.apply()
         HomeAssistant.readExtras(this, i)   // smart home ("ha_b64"), kept apart from the page's settings
@@ -279,7 +329,12 @@ class MainActivity : Activity() {
         offline = false
         pageReady = false
         val tv = prefs.getString("tv", null)
-        w.loadUrl(if (tv.isNullOrEmpty()) "$base/tv/" else "$base/tv/?tv=$tv")
+        val key = prefs.getString("pairing_key", null)
+        val q = mutableListOf<String>()
+        if (!tv.isNullOrEmpty()) q.add("tv=$tv")
+        if (!key.isNullOrEmpty()) q.add("key=$key")
+        val qs = if (q.isEmpty()) "" else "?" + q.joinToString("&")
+        w.loadUrl("$base/tv/$qs")
         // Never a blank screen: if the page is slow, show the app grid until it arrives.
         main.postDelayed({ if (!pageReady) showFallback() }, SLOW_MS)
     }
@@ -475,6 +530,7 @@ class MainActivity : Activity() {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
             "webp" -> "image/webp"
+            "mp4" -> "video/mp4"   // a scene's own clip (home.my_scenes[].video)
             "svg" -> "image/svg+xml"
             "woff2" -> "font/woff2"
             else -> "application/octet-stream"
@@ -506,6 +562,17 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun launch(pkg: String): Boolean = launchPackage(pkg)
 
+        /** Is couch-tv the home? "held", "google_tv" (explain the Home button watch) or "ask" (HomeRole.kt, #98). */
+        @JavascriptInterface
+        fun homeState(): String = HomeRole.state(this@MainActivity)
+
+        /** Asks Android to make couch-tv the home (its own chooser). False when this TV has none. */
+        @JavascriptInterface
+        fun requestHome(): Boolean {
+            main.post { if (!HomeRole.request(this@MainActivity)) js("window.tv && tv.homeAnswered && tv.homeAnswered(false)") }
+            return true
+        }
+
         /** Android's Watch Next list (what each app says you are in the middle of), as JSON. */
         @JavascriptInterface
         fun watchNext(): String = readWatchNext().toString()
@@ -514,8 +581,28 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun openWatchNext(id: String): Boolean = openWatchNextItem(id)
 
+        /** Kids mode with no computer (docs/CONFIG.md): open a show's own link (an intent:// or app
+         *  link that home-config.py looked up) in the app it belongs to, and only that app. False if
+         *  the app is not on this TV or will not take the link; the page then opens the app itself. */
         @JavascriptInterface
-        fun openSettings(): Boolean = start(Intent(Settings.ACTION_SETTINGS))
+        fun openLink(uri: String, pkg: String): Boolean = openShowLink(uri, pkg)
+
+        /** Hide a Watch Next card on this TV only: its id and package|title are remembered, the app's own row is never touched. */
+        @JavascriptInterface
+        fun dismissWatchNext(id: String, pkg: String, title: String): Boolean =
+            dismissWatchNextItem(id, pkg, title)
+
+        @JavascriptInterface
+        fun canSleep(): Boolean = true
+
+        @JavascriptInterface
+        fun setSleepTimer(minutes: Int): Boolean = setNativeSleepTimer(minutes)
+
+        @JavascriptInterface
+        fun getSleepRemainingMinutes(): Int = getNativeSleepMinutes()
+
+        @JavascriptInterface
+        fun openSettings(): Boolean = startSettings(tvSettingsIntent())
 
         /** Holding OK on an app, "Uninstall": Android's own remove dialog. Never ourselves.
          *  On TVs with no remove dialog, falls back to the app's details screen (it has Uninstall).
@@ -573,6 +660,22 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun openInputs(): Boolean = inputsIntent()?.let { start(it) } ?: false
+
+        // Screen off / Audio-only mode: drops window backlight override to 0f on Android TV
+        // while soundscapes, Spotify or background media continue playing.
+        @JavascriptInterface
+        fun setScreenOff(off: Boolean): Boolean {
+            main.post {
+                try {
+                    val lp = window.attributes
+                    lp.screenBrightness = if (off) 0.0f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                    window.attributes = lp
+                } catch (e: Exception) {
+                    android.util.Log.w("couch-tv", "setScreenOff failed: $e")
+                }
+            }
+            return true
+        }
 
         // The TV's screensaver: Google TV's Ambient mode, where the source and the Google Photos
         // albums are chosen. The dream service only lets the system start a dream, so the TV is
@@ -662,8 +765,11 @@ class MainActivity : Activity() {
                 "network" -> listOf(Settings.ACTION_WIFI_SETTINGS, Settings.ACTION_WIRELESS_SETTINGS)
                 else -> emptyList()
             } + Settings.ACTION_SETTINGS
-            val i = actions.asSequence().map { Intent(it) }.firstOrNull { packageManager.resolveActivity(it, 0) != null }
-            return i?.let { start(it) } ?: false
+            // Fire OS: every Settings action goes through Amazon's home, which the Home button watch puts
+            // couch-tv back over (#75). With the watch on, open Fire OS's own Settings screen by name.
+            val fire = if (FireWatch.connected) FireWatch.amazonSettings(packageManager) else null
+            val i = fire ?: actions.asSequence().map { Intent(it) }.firstOrNull { packageManager.resolveActivity(it, 0) != null }
+            return i?.let { startSettings(it) } ?: false
         }
 
         // The saved copy has its own web storage, so the page keeps what it needs offline here.
@@ -723,6 +829,7 @@ class MainActivity : Activity() {
     // The framework's own result callback (this app has no AndroidX, so no result API).
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == HomeRole.REQUEST) { js("window.tv && tv.homeAnswered && tv.homeAnswered(" + HomeRole.held(this) + ")"); return }
         if (requestCode != PICK_PHOTOS) return
         val uris = mutableListOf<android.net.Uri>()
         if (resultCode == RESULT_OK && data != null) {
@@ -731,7 +838,7 @@ class MainActivity : Activity() {
         }
         io.execute {
             val names = JSONArray()
-            for (u in uris.take(20)) copyPhoto(u)?.let { names.put(it) }
+            for (u in uris.take(MAX_PHOTOS)) copyPhoto(u)?.let { names.put(it) }
             main.post { js("window.tv && tv.photosAdded(" + JSONObject.quote(names.toString()) + ")") }
         }
     }
@@ -751,7 +858,12 @@ class MainActivity : Activity() {
             val raw = contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) } ?: return null
             val turn = try {
                 contentResolver.openInputStream(uri)?.use {
-                    when (android.media.ExifInterface(it).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1)) {
+                    val exif = if (Build.VERSION.SDK_INT >= 24) android.media.ExifInterface(it) else {
+                        // Android 6: ExifInterface only reads a file path, so use a short lived copy
+                        val tmp = java.io.File.createTempFile("exif", ".jpg", cacheDir)
+                        try { tmp.outputStream().use { o -> it.copyTo(o) }; android.media.ExifInterface(tmp.path) } finally { tmp.delete() }
+                    }
+                    when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1)) {
                         6 -> 90f; 3 -> 180f; 8 -> 270f; else -> 0f
                     }
                 } ?: 0f
@@ -782,14 +894,14 @@ class MainActivity : Activity() {
     /** HDMI and the other passthrough inputs Android lists, minus any the TV's owner hid. */
     private fun passthroughInputs(): List<TvInputInfo> = try {
         val tim = getSystemService(TV_INPUT_SERVICE) as? TvInputManager
-        tim?.tvInputList.orEmpty().filter { it.isPassthroughInput && !it.isHidden(this) }
+        tim?.tvInputList.orEmpty().filter { it.isPassthroughInput && (Build.VERSION.SDK_INT < 24 || !it.isHidden(this)) }
     } catch (e: Exception) {
         emptyList()
     }
 
     /** The name the TV gives an input: the one its owner set, else the TV's own. */
     private fun inputLabel(i: TvInputInfo): String? = try {
-        (i.loadCustomLabel(this) ?: i.loadLabel(this))?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        ((if (Build.VERSION.SDK_INT >= 24) i.loadCustomLabel(this) else null) ?: i.loadLabel(this))?.toString()?.trim()?.takeIf { it.isNotEmpty() }
     } catch (e: Exception) {
         null
     }
@@ -856,7 +968,9 @@ class MainActivity : Activity() {
             main.removeCallbacks(idleTick)
             idleShots = 0
             main.postDelayed(idleTick, 700)
-            main.postDelayed({ restoreTimeout() }, AMBIENT_WINDOW_MS)
+            ambientAt = android.os.SystemClock.elapsedRealtime()
+            main.removeCallbacks(ambientDeadline)   // a deadline left by an earlier press must not cut this one short
+            main.postDelayed(ambientDeadline, AMBIENT_WINDOW_MS)
             true
         } catch (e: Exception) {
             android.util.Log.w("couch-tv", "screensaver refused: " + e)
@@ -866,9 +980,18 @@ class MainActivity : Activity() {
     }
 
     /** Puts back the screen timeout the TV had before the screensaver button shortened it. */
-    private fun restoreTimeout(dream: Boolean = false) {
+    private fun restoreTimeout(dream: Boolean = false, resume: Boolean = false) {
         val saved = prefs.getInt("timeout_saved", -1)
         if (saved <= 0) return
+        // Some TVs (a Philips 43PUS8546, #146) bring this activity back to the front a moment after the
+        // timeout is cut, which used to put it straight back (about 0.5 s in) and report the TV as
+        // refusing. A resume that early is not the screensaver ending, so it is left alone: the
+        // screensaver ending (onPause), the deadline and a restart still restore it, so a TV is never
+        // left on five seconds.
+        if (resume && ambientAt > 0 && android.os.SystemClock.elapsedRealtime() - ambientAt < AMBIENT_EARLY_MS) {
+            android.util.Log.i("couch-tv", "screensaver: resume too soon after the press, timeout kept")
+            return
+        }
         val pressed = pressPending
         pressPending = false
         prefs.edit().remove("timeout_saved").apply()
@@ -882,6 +1005,8 @@ class MainActivity : Activity() {
     // Holds the short timeout in place and nudges the idle timer until the TV naps by itself: the
     // power manager may keep the old value for a moment, and it only re-reads it on user activity.
     private var pressPending = false
+    private var ambientAt = 0L   // when the last press cut the timeout (elapsedRealtime), 0 for none
+    private val ambientDeadline = Runnable { restoreTimeout() }
     private var idleShots = 0
     private val idleTick = object : Runnable {
         override fun run() {
@@ -904,8 +1029,9 @@ class MainActivity : Activity() {
     private fun appList(): List<Pair<ResolveInfo, String>> = appCache ?: synchronized(this) {
         appCache ?: run {
             val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
-            val store = amazonAppstoreIntent()?.let { packageManager.resolveActivity(it, 0) }
-            (listOfNotNull(store) + packageManager.queryIntentActivities(q, 0))
+            val nativeStore = amazonAppstoreIntent()?.let { packageManager.resolveActivity(it, 0) }
+            val store = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage("com.amazon.venezia")
+            (listOfNotNull(nativeStore) + packageManager.queryIntentActivities(q, 0) + packageManager.queryIntentActivities(store, 0))
                 .filter { it.activityInfo.packageName != packageName }
                 .distinctBy { it.activityInfo.packageName }
                 .map { it to if (it.activityInfo.packageName == AMAZON_APPSTORE) "Amazon Appstore" else it.loadLabel(packageManager).toString() }
@@ -938,6 +1064,25 @@ class MainActivity : Activity() {
     /** The picture addresses the Watch Next list gave us: the only ones the art route will fetch. */
     private val watchNextArtSeen = java.util.Collections.synchronizedSet(HashSet<String>())
 
+    /** A Keep watching picture as the page asks for it: through the art route, which fetches only addresses seen here. */
+    private fun artRoute(art: String): String = "http://tvos.invalid/art/" + android.util.Base64.encodeToString(
+        art.toByteArray(), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+
+    // Apps that put nothing in Watch Next but publish what you are part way through as a home screen
+    // channel of their own (Android TV's preview channels): package to that channel's internal
+    // provider id, which does not change with the TV's language. Stremio (com.stremio.one) keeps a
+    // "Continue Watching" channel. Read the same way as Watch Next: the TV provider, READ_TV_LISTINGS,
+    // read only, no account. Their cards have ids "ch:<the app's own id for the item>".
+    private val CONTINUE_CHANNELS = mapOf("com.stremio.one" to "continue_watching_channel")
+    private val TV_CHANNELS = android.net.Uri.parse("content://android.media.tv/channel")
+    private val PREVIEW_PROGRAMS = android.net.Uri.parse("content://android.media.tv/preview_program")
+    private val CHANNEL_CARD = "ch:"
+    /** The app's own id for a channel item (Stremio: the IMDb id), as a card id carries it. */
+    private val CHANNEL_ITEM = Regex("[A-Za-z0-9._-]{1,100}")
+    /** The channel card opened last and when, for one retry if the app crashes on the way in. */
+    @Volatile private var channelOpened: Pair<Long, Intent>? = null
+    private val CHANNEL_RETRY_MS = 3000L
+
     /** Asks once. Without it Android answers the Watch Next query with nothing. */
     private fun askWatchNextPermission() {
         if (checkSelfPermission(READ_TV) == PackageManager.PERMISSION_GRANTED) return
@@ -950,22 +1095,43 @@ class MainActivity : Activity() {
         val out = JSONArray()
         if (checkSelfPermission(READ_TV) != PackageManager.PERMISSION_GRANTED) return out
         try {
+            val homeCfg = try {
+                val raw = prefs.getString("config", null)
+                if (raw != null) JSONObject(raw).optJSONObject("home") else null
+            } catch (e: Exception) {
+                null
+            }
+            val skipSet = HashSet<String>().apply {
+                homeCfg?.optJSONArray("skip_watch_next")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val p = arr.optString(i)?.trim()
+                        if (!p.isNullOrEmpty()) add(p)
+                    }
+                }
+            }
+            val perAppLimit = (homeCfg?.optInt("watch_next_per_app", 5) ?: 5).coerceIn(1, 20)
+            val hiddenIds = prefs.getStringSet("hidden_watch_next_ids", emptySet()) ?: emptySet()
+
             val cols = arrayOf("_id", "package_name", "title", "episode_title", "season_display_number",
                 "episode_display_number", "poster_art_uri", "thumbnail_uri", "last_playback_position_millis",
                 "duration_millis", "last_engagement_time_utc_millis")
             contentResolver.query(WATCH_NEXT, cols, null, null, "last_engagement_time_utc_millis DESC")?.use { c ->
                 val perApp = HashMap<String, Int>()
-                while (c.moveToNext() && out.length() < 12) {
+                while (c.moveToNext() && out.length() < 20) {
+                    val rowId = c.getLong(0).toString()
                     val pkg = c.getString(1) ?: continue
-                    if (pkg == packageName) continue
-                    val n = (perApp[pkg] ?: 0) + 1
-                    if (n > 4) continue
-                    perApp[pkg] = n
-                    val art = c.getString(7)?.takeIf { it.isNotBlank() } ?: c.getString(6)?.takeIf { it.isNotBlank() }
-                    if (art != null) watchNextArtSeen.add(art)
                     val label = try {
                         packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
                     } catch (e: Exception) { pkg }
+                    val rawTitle = c.getString(2) ?: ""
+                    val effectiveTitle = if (rawTitle.isNotBlank()) rawTitle else label
+                    if (rowId in hiddenIds || "$pkg|$effectiveTitle" in hiddenIds || (rawTitle.isNotBlank() && "$pkg|$rawTitle" in hiddenIds)) continue
+                    if (pkg == packageName || pkg in skipSet) continue
+                    val n = (perApp[pkg] ?: 0) + 1
+                    if (n > perAppLimit) continue
+                    perApp[pkg] = n
+                    val art = c.getString(7)?.takeIf { it.isNotBlank() } ?: c.getString(6)?.takeIf { it.isNotBlank() }
+                    if (art != null) watchNextArtSeen.add(art)
                     val pos = c.getLong(8)
                     val dur = c.getLong(9)
                     out.put(JSONObject().apply {
@@ -975,8 +1141,7 @@ class MainActivity : Activity() {
                         put("episode_title", c.getString(3) ?: "")
                         put("season", c.getString(4) ?: "")
                         put("episode", c.getString(5) ?: "")
-                        if (art != null) put("backdrop", "http://tvos.invalid/art/" + android.util.Base64.encodeToString(
-                            art.toByteArray(), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING))
+                        if (art != null) put("backdrop", artRoute(art))
                         if (dur > 0 && pos > 0) put("progress", (pos.toDouble() / dur).coerceIn(0.0, 1.0))
                         put("app", JSONObject().put("package", pkg).put("name", label))
                         // for the bridge (POST /api/watch-next): which app, and when it was last watched,
@@ -986,35 +1151,195 @@ class MainActivity : Activity() {
                     })
                 }
             }
+            // and the apps whose Continue Watching is a home screen channel (Stremio), newest first together
+            val channel = channelCards(skipSet, perAppLimit, hiddenIds)
+            if (channel.isNotEmpty()) {
+                val all = (0 until out.length()).map { out.getJSONObject(it) } + channel
+                return JSONArray().apply { all.sortedByDescending { it.optLong("engaged") }.take(20).forEach { put(it) } }
+            }
         } catch (e: Exception) {
             // no provider or no permission: an empty row, never a crash
         }
         return out
     }
 
-    private fun openWatchNextItem(id: String): Boolean {
-        if (!Regex("[0-9]{1,18}").matches(id)) return false
-        try {
-            val cols = arrayOf("package_name", "intent_uri")
-            val uri = android.content.ContentUris.withAppendedId(WATCH_NEXT, id.toLong())
-            contentResolver.query(uri, cols, null, null, null)?.use { c ->
-                if (!c.moveToFirst()) return false
-                val pkg = c.getString(0) ?: return false
-                val raw = c.getString(1)
-                if (raw != null) {
-                    try {
-                        val i = Intent.parseUri(raw, Intent.URI_INTENT_SCHEME)
-                        // only ever open something in the app that owns the item
-                        if (i.component != null && i.component!!.packageName != pkg) i.component = null
-                        i.`package` = pkg
-                        i.selector = null
-                        if (i.resolveActivity(packageManager) != null && start(i)) return true
-                    } catch (e: Exception) {}
-                }
-                return launchPackage(pkg)
+    /** The channels of the apps in CONTINUE_CHANNELS that are on this TV: channel id to its app. */
+    private fun continueChannels(): Map<Long, String> {
+        val out = LinkedHashMap<Long, String>()
+        if (Build.VERSION.SDK_INT < 26) return out   // preview channels came with Android 8
+        contentResolver.query(TV_CHANNELS, arrayOf("_id", "package_name", "internal_provider_id"), null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val pkg = c.getString(1) ?: continue
+                if (CONTINUE_CHANNELS[pkg] == c.getString(2)) out[c.getLong(0)] = pkg
             }
+        }
+        return out
+    }
+
+    private fun programsOf(channel: Long) =
+        PREVIEW_PROGRAMS.buildUpon().appendQueryParameter("channel", channel.toString()).build()
+
+    /**
+     * Keep watching cards from the apps in CONTINUE_CHANNELS: the programs of their own channel, in
+     * the app's order. A card's id is the app's own id for the item ("ch:tt0238784"), because the
+     * app rewrites its channel whenever it changes, with new program ids. A channel program has no
+     * "last watched" time, so the time a card was first seen as it is now (its episode and how far
+     * in) stands in for one, to place the row among the Watch Next cards: what was just watched
+     * moves the row to the front. Inside the row the app's own order wins.
+     */
+    private fun channelCards(skip: Set<String>, perAppLimit: Int, hidden: Set<String>): List<JSONObject> {
+        val channels = continueChannels().filterValues { it !in skip }
+        if (channels.isEmpty()) return emptyList()
+        val before = prefs.getString("channel_cards_seen", null)
+        val seen = try { JSONObject(before ?: "{}") } catch (e: Exception) { JSONObject() }
+        val now = System.currentTimeMillis()
+        val kept = JSONObject()
+        val out = ArrayList<JSONObject>()
+        val cols = arrayOf("title", "episode_title", "season_display_number", "episode_display_number",
+            "poster_art_uri", "thumbnail_uri", "last_playback_position_millis", "duration_millis", "internal_provider_id")
+        for ((channel, pkg) in channels) {
+            val label = try {
+                packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            } catch (e: Exception) { pkg }
+            contentResolver.query(programsOf(channel), cols, null, null, "_id ASC")?.use { c ->
+                var place = 0
+                var shown = 0
+                var newer = Long.MAX_VALUE   // the app's own order wins inside its row
+                while (c.moveToNext()) {
+                    val title = c.getString(0)?.takeIf { it.isNotBlank() } ?: continue
+                    val item = c.getString(8)?.takeIf { CHANNEL_ITEM.matches(it) } ?: continue
+                    val key = "$pkg|$item"
+                    val state = listOf(c.getString(2), c.getString(3), c.getLong(6)).joinToString(":")
+                    val was = seen.optJSONObject(key)
+                    val first = if (was != null && was.optString("state") == state) was.optLong("t") else now - place
+                    place++
+                    kept.put(key, JSONObject().put("state", state).put("t", first))
+                    val engaged = minOf(first, newer - 1)
+                    newer = engaged
+                    val id = CHANNEL_CARD + item
+                    if (id in hidden || "$pkg|$title" in hidden || ++shown > perAppLimit) continue
+                    val art = c.getString(5)?.takeIf { it.isNotBlank() } ?: c.getString(4)?.takeIf { it.isNotBlank() }
+                    if (art != null) watchNextArtSeen.add(art)
+                    val pos = c.getLong(6)
+                    val dur = c.getLong(7)
+                    out.add(JSONObject().apply {
+                        put("id", id)
+                        put("wn", true)
+                        put("title", title)
+                        put("episode_title", c.getString(1) ?: "")
+                        put("season", c.getString(2) ?: "")
+                        put("episode", c.getString(3) ?: "")
+                        if (art != null) put("backdrop", artRoute(art))
+                        if (dur > 0 && pos > 0) put("progress", (pos.toDouble() / dur).coerceIn(0.0, 1.0))
+                        put("app", JSONObject().put("package", pkg).put("name", label))
+                        put("package", pkg)
+                        put("engaged", engaged)
+                    })
+                }
+            }
+        }
+        val after = kept.toString()
+        if (after != before) prefs.edit().putString("channel_cards_seen", after).apply()
+        return out
+    }
+
+    private fun openWatchNextItem(id: String): Boolean {
+        try {
+            // a card from an app's own Continue Watching channel (channelCards), or a Watch Next row
+            val fromChannel = id.startsWith(CHANNEL_CARD)
+            val (pkg, raw) = (if (fromChannel) channelItem(id.removePrefix(CHANNEL_CARD)) else watchNextRow(id)) ?: return false
+            if (raw != null) {
+                try {
+                    val i = Intent.parseUri(raw, Intent.URI_INTENT_SCHEME)
+                    // only ever open something in the app that owns the item
+                    if (i.component != null && i.component!!.packageName != pkg) i.component = null
+                    i.`package` = pkg
+                    i.selector = null
+                    // A channel card opens in a fresh task, and is remembered for one retry: Stremio
+                    // already running with a show open swaps its old screen out for a link, and on
+                    // an onn 4K Pro (Android 14, with the Home button watch on) that swap can crash
+                    // it in Android's accessibility code, which lands back here at once. Its next
+                    // start is a cold one, which opens the link cleanly (onResume).
+                    if (fromChannel) i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    if (i.resolveActivity(packageManager) != null && start(i)) {
+                        if (fromChannel) channelOpened = android.os.SystemClock.elapsedRealtime() to Intent(i)
+                        return true
+                    }
+                } catch (e: Exception) {}
+            }
+            return launchPackage(pkg)
         } catch (e: Exception) {}
         return false
+    }
+
+    /** A Watch Next row's app and link, by its row id. */
+    private fun watchNextRow(id: String): Pair<String, String?>? {
+        if (!Regex("[0-9]{1,18}").matches(id)) return null
+        val uri = android.content.ContentUris.withAppendedId(WATCH_NEXT, id.toLong())
+        contentResolver.query(uri, arrayOf("package_name", "intent_uri"), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0)?.let { return it to c.getString(1) }
+        }
+        return null
+    }
+
+    /**
+     * A channel card's app and link, by the app's own id for the item. The app rewrites its channel
+     * whenever it changes, so the item is looked up again as it opens, and the link is the app's
+     * current one for it (Stremio's resumes the episode where it stopped).
+     */
+    private fun channelItem(item: String): Pair<String, String?>? {
+        if (!CHANNEL_ITEM.matches(item)) return null
+        for ((channel, pkg) in continueChannels()) {
+            contentResolver.query(programsOf(channel), arrayOf("internal_provider_id", "intent_uri"), null, null, null)?.use { c ->
+                while (c.moveToNext()) if (c.getString(0) == item) return pkg to c.getString(1)
+            }
+        }
+        return null
+    }
+
+    private var nativeSleepTimer: Runnable? = null
+    private var nativeSleepEndMs: Long = 0L
+
+    private fun dismissWatchNextItem(id: String, pkg: String, title: String): Boolean {
+        if (id.isBlank() && pkg.isBlank()) return false
+        return try {
+            val hidden = prefs.getStringSet("hidden_watch_next_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+            if (id.isNotBlank()) hidden.add(id)
+            if (pkg.isNotBlank() && title.isNotBlank()) hidden.add("$pkg|$title")
+            prefs.edit().putStringSet("hidden_watch_next_ids", hidden).apply()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun setNativeSleepTimer(minutes: Int): Boolean {
+        nativeSleepTimer?.let { main.removeCallbacks(it) }
+        nativeSleepTimer = null
+        if (minutes <= 0) {
+            nativeSleepEndMs = 0L
+            return true
+        }
+        nativeSleepEndMs = System.currentTimeMillis() + (minutes * 60 * 1000L)
+        val runnable = Runnable {
+            nativeSleepEndMs = 0L
+            main.post {
+                if (!startAmbientNow()) {
+                    val i = Intent(AMBIENT_SETTINGS)
+                    if (packageManager.resolveActivity(i, 0) != null) start(i)
+                }
+            }
+        }
+        nativeSleepTimer = runnable
+        main.postDelayed(runnable, minutes * 60 * 1000L)
+        return true
+    }
+
+    private fun getNativeSleepMinutes(): Int {
+        if (nativeSleepEndMs <= 0L) return 0
+        val diff = nativeSleepEndMs - System.currentTimeMillis()
+        if (diff <= 0L) return 0
+        return ((diff + 59999L) / 60000L).toInt()
     }
 
     /** The picture behind a Watch Next card: a web address or a content address the page cannot read itself. */
@@ -1047,11 +1372,49 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun openShowLink(uri: String, pkg: String): Boolean {
+        if (pkg.isBlank() || uri.length > 2000 || pkg == packageName) return false
+        try {
+            packageManager.getPackageInfo(pkg, 0)
+        } catch (e: Exception) {
+            return false
+        }
+        return try {
+            val i = if (uri.startsWith("intent:")) Intent.parseUri(uri, Intent.URI_INTENT_SCHEME)
+                    else Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+            // the link opens in the app named for it, never anywhere else
+            if (i.component != null && i.component!!.packageName != pkg) i.component = null
+            i.`package` = pkg
+            i.selector = null
+            if (i.resolveActivity(packageManager) == null) false else start(i)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun launchPackage(pkg: String): Boolean {
-        val i = (if (pkg == AMAZON_APPSTORE) amazonAppstoreIntent() else null)
-            ?: packageManager.getLeanbackLaunchIntentForPackage(pkg)
+        // The Settings tile: on Fire OS the Settings app (com.amazon.tv.settings*) starts through
+        // Amazon's home, which the Home button watch puts couch-tv back over (#123). Open Fire OS's own
+        // Settings screen by name instead, and tell the watch it is us.
+        if (pkg == "com.android.tv.settings" || pkg.startsWith(FireWatch.AMAZON_SETTINGS_PKG)) {
+            FireWatch.amazonSettings(packageManager)?.let { return startSettings(it) }
+        }
+        val store = Intent("com.amazon.venezia.ade.FEATURED_LAUNCH").setPackage(pkg)
+            .takeIf { pkg == "com.amazon.venezia" && packageManager.resolveActivity(it, 0) != null }
+        val i = (if (pkg == AMAZON_APPSTORE) amazonAppstoreIntent() else null) ?: store ?: packageManager.getLeanbackLaunchIntentForPackage(pkg)
             ?: packageManager.getLaunchIntentForPackage(pkg)
             ?: return false
+        // Bell's Fibe app is the home on a Bell Streamer and also its live TV: opened on purpose, it stays (#168).
+        if (pkg == FireWatch.BELL_FIBE_HOME) FireWatch.fibeOpenedNow()
+        return start(i)
+    }
+
+    /** The TV's Settings: Fire OS's own screen by name on a Fire TV (it stays open under the Home button watch, #75), else Android's Settings action. */
+    private fun tvSettingsIntent(): Intent = FireWatch.amazonSettings(packageManager) ?: Intent(Settings.ACTION_SETTINGS)
+
+    /** Starts a Settings screen and lets the Home button watch know it was asked for (#123). */
+    private fun startSettings(i: Intent): Boolean {
+        FireWatch.allowSettingsNow()
         return start(i)
     }
 
@@ -1070,7 +1433,12 @@ class MainActivity : Activity() {
 
     private fun start(i: Intent): Boolean = try {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        main.post { startActivity(i) }
+        main.post {
+            try {
+                startActivity(i)
+            } catch (_: Exception) {
+            }
+        }
         true
     } catch (e: Exception) {
         false
@@ -1195,7 +1563,7 @@ class MainActivity : Activity() {
                     (v.foreground as GradientDrawable).setStroke(if (has) px(3) else 0, AMBER)
                     v.elevation = if (has) px(8).toFloat() else 0f
                 }
-                setOnClickListener { if (ri == null) start(Intent(Settings.ACTION_SETTINGS)) else launchPackage(pkg) }
+                setOnClickListener { if (ri == null) startSettings(tvSettingsIntent()) else launchPackage(pkg) }
             }
             if (ri != null) {
                 tile.addView(ImageView(this).apply {
@@ -1260,6 +1628,14 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        @Volatile private var shown: java.lang.ref.WeakReference<MainActivity>? = null
+
+        /** What onNewIntent does for a Home press, for when FireWatch brought the home back without a new intent. */
+        fun backToFirstTile() {
+            val a = shown?.get() ?: return
+            a.main.post { if (!a.isFinishing && !a.isDestroyed) a.js("window.tv && tv.home()") }
+        }
+
         /** A TV's name, as apply.sh passes it: small letters, digits and dashes. */
         private val TV_NAME = Regex("[a-z0-9-]{1,32}")
 
@@ -1269,11 +1645,13 @@ class MainActivity : Activity() {
             "com.google.android.tv.action.VIEW_INPUTS",
             "android.media.tv.action.SETUP_INPUTS"          // the system list of TV inputs
         )
+        private const val MAX_PHOTOS = 50   // same as MAX_PHOTOS in tv-home/web/app.js and bridge/server.py
         private const val RETRY_MS = 15_000L
         private const val OFFLINE_RETRY_MS = 60_000L   // looking for the bridge while the saved copy shows
         private const val OFFLINE_HOST = "home.tvos.invalid"
         private const val BUNDLED = "www/tv"   // the built-in copy, in the app's assets
         private const val SLOW_MS = 2_500L
+        private const val NET_WAIT_MS = 15_000L   // at power-on, how long the first load waits for Wi-Fi
         private const val PICK_PHOTOS = 41
         // The screensaver: Google TV's Ambient mode settings (source and the Google Photos albums),
         // the short screen timeout the home sets for a moment, and what to put back afterwards.
@@ -1282,6 +1660,7 @@ class MainActivity : Activity() {
         private const val SHORT_MS = 15_000
         private const val AMBIENT_RESTORE_MS = 600_000
         private const val AMBIENT_WINDOW_MS = 25_000L
+        private const val AMBIENT_EARLY_MS = 4_000L   // a resume inside this long after a press is not the screensaver ending
         private const val MATCH_W = ViewGroup.LayoutParams.MATCH_PARENT
         private val MATCH = FrameLayout.LayoutParams(MATCH_W, MATCH_W)
         private val GROUND = Color.parseColor("#0D1E19")
