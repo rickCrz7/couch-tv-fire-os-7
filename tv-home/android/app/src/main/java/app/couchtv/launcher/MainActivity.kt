@@ -623,6 +623,13 @@ class MainActivity : Activity() {
                     put("devices", devices)
                 })
             }
+            if (amazonGuideIntent() != null) {
+                out.put(JSONObject().apply {
+                    put("id", "amazon-live-tv-guide")
+                    put("label", "Amazon Live TV Guide")
+                    put("type", "guide")
+                })
+            }
             return out.toString()
         }
 
@@ -632,6 +639,7 @@ class MainActivity : Activity() {
          */
         @JavascriptInterface
         fun openInput(id: String): Boolean {
+            if (id == "amazon-live-tv-guide") return amazonGuideIntent()?.let { start(it) } ?: false
             if (id.isBlank()) return false
             if (Build.MODEL == "AFTHA001") {
                 val input = passthroughInputs().firstOrNull { it.id == id } ?: return false
@@ -1031,6 +1039,19 @@ class MainActivity : Activity() {
             ?: packageManager.getLaunchIntentForPackage(pkg)
             ?: return false
         return start(i)
+    }
+
+    private fun amazonGuideIntent(): Intent? {
+        if (Build.MODEL != "AFTHA001") return null
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("livetv://showGuideButtonContent"))
+            .setPackage("com.amazon.tv.livetv")
+        val handler = packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo ?: return null
+        val permission = handler.permission
+        return intent.takeIf {
+            handler.exported && (permission == null ||
+                checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+        }
     }
 
     private fun start(i: Intent): Boolean = try {

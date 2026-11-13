@@ -29,6 +29,7 @@
 
     <!-- See every app that has a TV launcher entry, so the fallback grid and app tiles can list them. -->
     <queries>
+        <package android:name="com.amazon.tv.livetv" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
