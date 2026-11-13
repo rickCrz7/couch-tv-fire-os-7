@@ -1141,8 +1141,11 @@
     var screens = data.screens.map(function (sc) {
       return { kind: "screen", id: sc.id, name: sc.name, ready: sc.ready, note: sc.note, package: "screen:" + sc.id };
     });
-    var items = rest.filter(function (a) { return a.kind !== "input" && !tucked(a); }).concat(screens, rest.filter(tucked), rest.filter(function (a) { return a.kind === "input" && !tucked(a); }));
-    var line = Math.min(DOCK_APPS, rest.filter(function (a) { return a.kind !== "input" && !tucked(a); }).length);
+    var apps = rest.filter(function (a) { return a.kind !== "input"; });
+    var home = apps.filter(function (a) { return !tucked(a); });
+    var inputs = rest.filter(function (a) { return a.kind === "input"; });
+    var items = home.concat(screens, apps.filter(tucked), inputs);
+    var line = Math.min(DOCK_APPS, home.length);
     var o = data.order;
     if (o && o.saved) {
       var at = {};
@@ -1224,7 +1227,7 @@
     var a = gridItems[g];
     if (!a || a.kind === "more") return false;
     if (a.store || a.kind === "gear" || a.kind === "smart" || a.kind === "screen") { flash(t("stays_put", { name: a.name })); return true; }
-    if (a.kind !== "app") return startMove();
+    if (a.kind !== "app" && a.kind !== "input") return startMove();
     openAppMenu(a);
     return true;
   }
@@ -1234,8 +1237,8 @@
   function openAppMenu(a) {
     amApp = a; amI = 0;
     amItems = [{ act: "move", label: t("ctx_move") }, { act: "hide", label: t("ctx_hide") }];
-    if (TV && TV.uninstall) amItems.push({ act: "uninstall", label: t("ctx_uninstall") });
-    if (TV && TV.appInfo) amItems.push({ act: "info", label: t("ctx_info") });
+    if (a.kind === "app" && TV && TV.uninstall) amItems.push({ act: "uninstall", label: t("ctx_uninstall") });
+    if (a.kind === "app" && TV && TV.appInfo) amItems.push({ act: "info", label: t("ctx_info") });
     zone = "appmenu";
     renderAppMenu();
   }
@@ -1289,7 +1292,7 @@
     var arr = arrangeItems();
     var idx = arr.items.map(function (it) { return it.package; }).indexOf(a.package);
     if (idx < 0) return false;
-    if (!expanded) {
+    if (!expanded && idx < arr.line) {
       materialise();
       lift = { pkg: a.package };
       hintFlash = "";
@@ -1659,7 +1662,7 @@
       else if (PEOPLE.length > 1) { plift = true; renderPop(); }
       return true;
     }
-    if (zone === "grid" && NIGHT) return holdApp();
+    if (zone === "grid") return holdApp();
     return false;
   }
 
@@ -2246,7 +2249,7 @@
       var o = materialise() && data.order, i = o.packages.indexOf(pkg);
       if (i < 0) return;
       if (i < o.line) { o.packages.splice(i, 1); o.line -= 1; o.packages.splice(o.line, 0, pkg); persistOrder(); }
-      else if (pkg.indexOf("screen:") === 0 || pkg.indexOf("input:") === 0) appToHome(pkg);
+      else if (pkg.indexOf("screen:") === 0) appToHome(pkg);
       else { o.packages.splice(i, 1); setHidden(HIDDEN_TV.concat([pkg])); persistOrder(); }
     }
     SET.dirty = true;
