@@ -86,7 +86,7 @@
 
     <application
         android:name=".App"
-        android:label="Home"
+        android:label="Couch TV HDMI Test"
         android:icon="@drawable/icon"
         android:banner="@drawable/banner"
         android:theme="@style/Home"
@@ -107,15 +107,13 @@
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.HOME" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity android:name=".HdmiInputActivity"
+            android:exported="false" android:screenOrientation="landscape" />
 
         <!-- What Android's installer says about an update (Updater.kt). Only reachable through the
              app's own PendingIntent. -->

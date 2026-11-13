@@ -16,7 +16,7 @@
       "wake_on_lan": true,
       "paired": false,
       "keep_disabled": "data/keep-disabled.json",
-      "quick": ["sleep"]
+      "quick": ["sleep", "input"]
     }
   ],
   "people": [
