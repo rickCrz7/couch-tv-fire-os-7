@@ -111,6 +111,7 @@
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
     look: '<svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="3"/><path d="M2.5 16l5.5-5.5 4.5 4.5 3-3 6 6"/><circle cx="16.5" cy="8.8" r="1.6"/></svg>',
     input: '<svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8 21h8M12 7.5v6M9.5 11l2.5 2.5 2.5-2.5"/></svg>',
+    controller: '<svg viewBox="0 0 24 24"><path d="M7 7h10c2 0 3.2 1.4 3.7 3.2l1.2 4.9c.6 2.5-1.7 4-3.4 2.5L15.5 15h-7l-3 2.6c-1.7 1.5-4-.1-3.4-2.5l1.2-4.9C3.8 8.4 5 7 7 7zM6 11h4m-2-2v4"/><circle cx="16" cy="10.5" r=".6"/><circle cx="18" cy="12.5" r=".6"/></svg>',
     screensaver: '<svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="14" rx="2.5"/><path d="M15.2 7.3a3.4 3.4 0 1 0 2.1 5 3.9 3.9 0 0 1-2.1-5z"/></svg>',
     bluetooth: '<svg viewBox="0 0 24 24"><path d="M6.5 7.5l11 9-5.5 4.5v-18l5.5 4.5-11 9"/></svg>',
     network: '<svg viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0M5.7 12.5a9.5 9.5 0 0 1 12.6 0M8.9 16a4.8 4.8 0 0 1 6.2 0"/><circle cx="12" cy="19.3" r="1"/></svg>',
@@ -883,11 +884,16 @@
     } catch (e) {}
     return [];
   }
+  function inputIcon(input) {
+    var names = [input.label].concat(input.devices || []).join(" ");
+    return /\b(play\s*station|ps[345]|xbox|nintendo|switch\s*2|steam\s*deck)\b/i.test(names)
+      ? ICONS.controller : ICONS.input;
+  }
   function openInputMenu(list) {
     inItems = list.map(function (x) {
       var kind = x.type === "hdmi" ? "HDMI" : t("input");
       var sub = (x.devices || []).join(", ");
-      return { act: "input", id: x.id, icon: ICONS.input, label: x.label || kind, sub: sub };
+      return { act: "input", id: x.id, icon: inputIcon(x), label: x.label || kind, sub: sub };
     });
     if ((TV && TV.openSettingsScreen) || ON_TV || window.MOCK_INPUTS) {
       inItems.push({ act: "bluetooth", icon: ICONS.bluetooth, label: t("bluetooth"), sub: t("bt_sub") });
@@ -1112,8 +1118,12 @@
   function gridList() {
     if (NIGHT) return dockList();
     var apps = shownApps().filter(function (a) { return a.package !== SETTINGS_PKG; });
-    var list = apps.filter(function (a) { return !tucked(a); });
-    var extra = apps.filter(tucked);
+    var pinned = arrangeItems();
+    var onHome = pinned.items.slice(0, pinned.line);
+    var list = apps.filter(function (a) {
+      return a.kind === "input" ? onHome.indexOf(a) >= 0 : !tucked(a);
+    });
+    var extra = apps.filter(function (a) { return list.indexOf(a) < 0; });
     data.screens.forEach(function (sc) { list.push({ kind: "screen", id: sc.id, name: sc.name, ready: sc.ready, note: sc.note }); });
     var tools = toolItems();
     if (expanded) return list.concat(extra, tools);
@@ -1131,8 +1141,8 @@
     var screens = data.screens.map(function (sc) {
       return { kind: "screen", id: sc.id, name: sc.name, ready: sc.ready, note: sc.note, package: "screen:" + sc.id };
     });
-    var items = rest.filter(function (a) { return !tucked(a); }).concat(screens, rest.filter(tucked));
-    var line = Math.min(DOCK_APPS, rest.filter(function (a) { return !tucked(a); }).length);
+    var items = rest.filter(function (a) { return a.kind !== "input" && !tucked(a); }).concat(screens, rest.filter(tucked), rest.filter(function (a) { return a.kind === "input" && !tucked(a); }));
+    var line = Math.min(DOCK_APPS, rest.filter(function (a) { return a.kind !== "input" && !tucked(a); }).length);
     var o = data.order;
     if (o && o.saved) {
       var at = {};
@@ -1365,7 +1375,8 @@
 
   function dockHTML(it) {
     var face;
-    if (it.kind === "screen") face = '<div class="face tool">' + ICONS.screen + "</div>";
+    if (it.kind === "input") face = '<div class="face tool">' + inputIcon(it.input) + "</div>";
+    else if (it.kind === "screen") face = '<div class="face tool">' + ICONS.screen + "</div>";
     else if (it.kind === "more") face = '<div class="face tool">' + ICONS.more + "</div>";
     else if (it.kind === "gear") face = '<div class="face tool">' + ICONS.gear + "</div>";
     else if (it.kind === "smart") face = '<div class="face tool">' + window.smartHome.icon + "</div>";
@@ -1379,7 +1390,8 @@
   function appHTML(it) {
     if (NIGHT) return dockHTML(it);
     var face;
-    if (it.kind === "screen") face = '<div class="face tool">' + ICONS.screen + "</div>";
+    if (it.kind === "input") face = '<div class="face tool">' + inputIcon(it.input) + "</div>";
+    else if (it.kind === "screen") face = '<div class="face tool">' + ICONS.screen + "</div>";
     else if (it.kind === "more") face = '<div class="face tool">' + ICONS.more + "</div>";
     else if (it.kind === "gear") face = '<div class="face tool">' + ICONS.gear + "</div>";
     else if (it.kind === "smart") face = '<div class="face tool">' + window.smartHome.icon + "</div>";
@@ -1700,6 +1712,10 @@
     if (a.kind === "more") { expanded = true; renderGrid(); paintFocus(); return; }
     if (a.kind === "gear") { openGear(); return; }
     if (a.kind === "smart") { openSmart(); return; }
+    if (a.kind === "input") {
+      if (!TV || !TV.openInput(a.id)) flash(t("no_inputs"));
+      return;
+    }
     if (a.kind === "screen") {
       if (!a.ready) { status(a.note || t("screen_not_set")); return; }
       el.classList.add("busy");
@@ -2230,7 +2246,7 @@
       var o = materialise() && data.order, i = o.packages.indexOf(pkg);
       if (i < 0) return;
       if (i < o.line) { o.packages.splice(i, 1); o.line -= 1; o.packages.splice(o.line, 0, pkg); persistOrder(); }
-      else if (pkg.indexOf("screen:") === 0) appToHome(pkg);
+      else if (pkg.indexOf("screen:") === 0 || pkg.indexOf("input:") === 0) appToHome(pkg);
       else { o.packages.splice(i, 1); setHidden(HIDDEN_TV.concat([pkg])); persistOrder(); }
     }
     SET.dirty = true;
@@ -2800,7 +2816,12 @@
     return list.map(function (a) {
       return { kind: "app", name: RENAME[a.package] ? t(RENAME[a.package]) : a.label, package: a.package,
         banner: TV.bannerUrl ? TV.bannerUrl(a.package) : "http://tvos.invalid/banner/" + a.package };   // the launcher makes one when the app has none
-    });
+    }).concat(inputList().map(function (input) {
+      var device = (input.devices || []).join(", ");
+      var name = input.label || t("input");
+      return { kind: "input", id: input.id, name: device ? name + " · " + device : name,
+        package: "input:" + input.id, input: input };
+    }));
   }
   function sortApps(list) {
     var rank = function (p) {

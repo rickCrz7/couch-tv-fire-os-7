@@ -904,10 +904,11 @@ class MainActivity : Activity() {
     private fun appList(): List<Pair<ResolveInfo, String>> = appCache ?: synchronized(this) {
         appCache ?: run {
             val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
-            packageManager.queryIntentActivities(q, 0)
+            val store = amazonAppstoreIntent()?.let { packageManager.resolveActivity(it, 0) }
+            (listOfNotNull(store) + packageManager.queryIntentActivities(q, 0))
                 .filter { it.activityInfo.packageName != packageName }
                 .distinctBy { it.activityInfo.packageName }
-                .map { it to it.loadLabel(packageManager).toString() }
+                .map { it to if (it.activityInfo.packageName == AMAZON_APPSTORE) "Amazon Appstore" else it.loadLabel(packageManager).toString() }
                 .sortedBy { it.second.lowercase() }
                 .also { appCache = it }
         }
@@ -1034,8 +1035,21 @@ class MainActivity : Activity() {
         } catch (e: Exception) { null }
     }
 
+    private val AMAZON_APPSTORE = "com.amazon.venezia"
+
+    private fun amazonAppstoreIntent(): Intent? {
+        if (Build.MODEL != "AFTHA001") return null
+        val intent = Intent(Intent.ACTION_MAIN).setClassName(AMAZON_APPSTORE, "$AMAZON_APPSTORE.ade.ADEHomeActivity")
+        val activity = packageManager.resolveActivity(intent, 0)?.activityInfo ?: return null
+        val permission = activity.permission
+        return intent.takeIf {
+            activity.exported && (permission == null || checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED)
+        }
+    }
+
     private fun launchPackage(pkg: String): Boolean {
-        val i = packageManager.getLeanbackLaunchIntentForPackage(pkg)
+        val i = (if (pkg == AMAZON_APPSTORE) amazonAppstoreIntent() else null)
+            ?: packageManager.getLeanbackLaunchIntentForPackage(pkg)
             ?: packageManager.getLaunchIntentForPackage(pkg)
             ?: return false
         return start(i)
