@@ -95,7 +95,7 @@
 
     <application
         android:name=".App"
-        android:label="Couch TV HDMI Test"
+        android:label="Home for Toshiba Fire TV"
         android:icon="@drawable/icon"
         android:banner="@drawable/banner"
         android:theme="@style/Home"

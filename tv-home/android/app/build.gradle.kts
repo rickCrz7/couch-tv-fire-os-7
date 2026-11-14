@@ -10,7 +10,7 @@ android {
     namespace = "app.couchtv.launcher"
     compileSdk = 34
     defaultConfig {
-        applicationId = "app.couchtv.launcher.hdmitest"
+        applicationId = "app.couchtv.launcher.toshiba.fireos"
         minSdk = 23          // Android 6.0 (older Mi TVs); Fire OS 6 (7.1) sticks install it too
         targetSdk = 34
         versionCode = 19

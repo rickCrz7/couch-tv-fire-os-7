@@ -19,6 +19,31 @@
   &nbsp;·&nbsp; <a href="docs/UPDATES.md">What's new</a>
 </b></p>
 
+## Home for Toshiba Fire TV
+
+This fork adds features to the home-only Android app for the Toshiba 50C350KU
+(`AFTHA001`), tested on Fire OS 7.7.1.7.
+
+- HDMI and Composite open through Android’s TV input player. Press Back to return to Home.
+- **Amazon Live TV Guide** opens the native guide from the Input menu with your existing channel lineup.
+- **Amazon Appstore** appears in the launcher’s app list.
+- Inputs start in **More apps**. Hold OK on a tile and choose **Move** to pin it.
+  Ports identified as game consoles use a controller icon.
+- Hold OK on an app for **Move**, **Hide from home**, **Uninstall**, and **App info**.
+  Restore hidden apps under **Home settings → Apps → Hidden**.
+
+Install the fork’s `couch-tv-home.apk` as a regular sideloaded app, then open
+**Home for Toshiba Fire TV** from the app list. The package is
+`app.couchtv.launcher.toshiba.fireos`. Android treats it as a fresh install
+relative to the earlier HDMI Test build, so set up your dock and preferences again.
+The upstream setup and removal scripts target the upstream package. Use the TV’s
+installed-app settings to remove this build.
+
+Custom changes live on `fire-tv-hdmi`. The fork’s `main` is reserved for upstream
+sync. Fork builds check this repository’s releases for updates.
+
+[Download fork releases](https://github.com/rickCrz7/couch-tv-fire-os-7/releases)
+
 ## Get started
 
 1. **With your AI agent, the easiest way.** Open this folder in Claude Code (or any coding agent)
